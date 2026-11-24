@@ -4,6 +4,8 @@ using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
 using System.Text;
 
+// Monta o host genérico do .NET só para carregar a configuração
+// (appsettings.json, appsettings.Development.json, user-secrets, variáveis de ambiente).
 var builder = Host.CreateApplicationBuilder(new HostApplicationBuilderSettings
 {
     Args = args,
@@ -11,6 +13,7 @@ var builder = Host.CreateApplicationBuilder(new HostApplicationBuilderSettings
 });
 var configuration = builder.Configuration;
 
+// Fábrica de conexões: aponta para o broker RabbitMQ usando os valores da configuração.
 var factory = new ConnectionFactory
 {
     HostName = GetRequiredSetting(configuration, "RabbitMq:Host"),
@@ -19,72 +22,88 @@ var factory = new ConnectionFactory
     Password = GetRequiredSetting(configuration, "RabbitMq:Password")
 };
 
+// Uma única conexão TCP com o broker; cada consumer terá seu próprio channel.
 using var connection = await factory.CreateConnectionAsync();
-const string exchangeName = "orders.fanout.exchange";
 
-var services = new[]
+// Mesmo nome do exchange declarado pelo Producer — é por ele que os dois se "encontram".
+const string exchangeName = "orders.topic.exchange";
+
+// Cada tupla é (nome da fila, padrão de binding). No topic exchange o binding
+// usa curingas sobre as palavras da routing key (separadas por ponto):
+//   '*' casa exatamente 1 palavra  → "payments.*" casa "payments.failed", mas não "payments.card.failed"
+//   '#' casa 0 ou mais palavras    → "orders.#"  casa "orders", "orders.created", "orders.eu.created"...
+// Uma mesma mensagem pode casar com vários bindings: ela é COPIADA para cada fila
+// que casar (ex.: "orders.created" cai em "orders.all" E em "orders.created").
+var subscriptions = new[]
 {
-    // "payment",
-    "inventory",
-    "notification"
+    ("orders.all", "orders.#"),         // todos os eventos de orders
+    ("orders.created", "orders.created"), // só o evento exato (sem curinga, vira match literal)
+    ("payments.all", "payments.*"),     // eventos de payments com 1 palavra após o ponto
+    ("inventory.all", "inventory.#")    // todos os eventos de inventory
 };
 
 // Manter os Channels vivos enquanto os Consumers estiverem ativos.
 var channels = new List<IChannel>();
 
-foreach (var service in services)
+foreach (var (queueName, routingKey) in subscriptions)
 {
     var channel = await connection.CreateChannelAsync();
     channels.Add(channel);
 
-    //declarar exchange fanout y cola para cada servicio
+    // Declara o exchange topic com os MESMOS parâmetros do Producer (idempotente).
+    // Declarar nos dois lados garante que funciona independente de quem sobe primeiro.
     await channel.ExchangeDeclareAsync(
         exchange: exchangeName,
-        type: ExchangeType.Fanout,
-        durable: true,
-        autoDelete: false,
+        type: ExchangeType.Topic,
+        durable: true,      // sobrevive a restart do broker
+        autoDelete: false,  // não some quando o último consumer desconecta
         arguments: null);
 
-    var queueName = $"Ordes.{service}";
-
-    //criar fila para o serviço
+    // Cria a fila desta assinatura (também idempotente).
     await channel.QueueDeclareAsync(
         queue: queueName,
-        durable: true,
-        exclusive: false,
-        autoDelete: false,
+        durable: true,     // fila sobrevive a restart do broker
+        exclusive: false,  // outras conexões também podem usar a fila
+        autoDelete: false, // fila não é apagada quando o consumer sai
         arguments: null);
 
-    //vincular fila ao exchange fanout
+    // O binding é onde a mágica do topic acontece: liga a fila ao exchange
+    // com um PADRÃO. O exchange compara a routing key de cada mensagem
+    // publicada com esse padrão para decidir se entrega uma cópia à fila.
     await channel.QueueBindAsync(
         queue: queueName,
         exchange: exchangeName,
-        routingKey: "");
+        routingKey: routingKey);
 
     var consumer = new AsyncEventingBasicConsumer(channel);
 
-    //tratar mensagens recebidas do exchange fanout
+    // Callback disparado para cada mensagem entregue pela fila.
     consumer.ReceivedAsync += (sender, eventArgs) =>
     {
-        var body = eventArgs.Body.ToArray();
+        var body = eventArgs.Body.ToArray(); // payload chega como bytes
         var message = Encoding.UTF8.GetString(body);
 
-        Console.WriteLine($"[{service.ToUpper()}] received: {message}");
+        // eventArgs.RoutingKey é a key ORIGINAL da publicação (ex.: "orders.created"),
+        // útil para ver qual padrão casou com o quê.
+        Console.WriteLine($"[{queueName}] Received: {eventArgs.RoutingKey} | {message}");
 
         return Task.CompletedTask;
     };
 
-    //iniciar consumo da fila do serviço
+    // Inicia o consumo. autoAck: true = o broker considera a mensagem entregue
+    // assim que a envia (simples para o lab; em produção prefira ack manual,
+    // senão mensagens se perdem se o consumer falhar no meio do processamento).
     await channel.BasicConsumeAsync(
         queue: queueName,
         autoAck: true,
         consumer: consumer
     );
 
-    Console.WriteLine($"Consumer for service '{service}' is running.");
+    Console.WriteLine($"Listening: {queueName} | Binding: {routingKey}");
 }
 
-Console.WriteLine("All consumers running. Press ENTER to exit.");
+// ReadLine segura o processo vivo; os consumers trabalham em background.
+Console.WriteLine("All topic consumers running. Press ENTER to exit.");
 Console.ReadLine();
 
 static string GetRequiredSetting(IConfiguration configuration, string key)
