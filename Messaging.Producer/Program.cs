@@ -17,35 +17,31 @@ var factory = new ConnectionFactory
     UserName = GetRequiredSetting(configuration, "RabbitMq:UserName"),
     Password = GetRequiredSetting(configuration, "RabbitMq:Password")
 };
+
 await using var connection = await factory.CreateConnectionAsync();
 await using var channel = await connection.CreateChannelAsync();
 
-var queueName = GetRequiredSetting(configuration, "RabbitMq:Queue");
-
-const string exchangeName = "orders.exchange";
-const string routingKey = "orders.cancelled";
+const string exchangeName = "orders.fanout.exchange";
 
 await channel.ExchangeDeclareAsync(
     exchange: exchangeName,
-    type: ExchangeType.Direct,
+    type: ExchangeType.Fanout,
     durable: true,
     autoDelete: false,
     arguments: null
 );
 
+var orderId = Guid.NewGuid();
 
-for (int i = 0; i < 10; i++)
-{
-    var message = $"Order {i} created at {DateTime.UtcNow:O}";
-    var body = Encoding.UTF8.GetBytes(message);
-    
-    await channel.BasicPublishAsync(
-        exchange: exchangeName,
-        routingKey: routingKey,
-        body: body);
-    
-    Console.WriteLine($"[Producer] Published: {message}");
-}
+var message = $"OrderCreated | OrderId: {orderId}";
+var body = Encoding.UTF8.GetBytes(message);
+
+await channel.BasicPublishAsync(
+    exchange: exchangeName,
+    routingKey: "",
+    body: body);
+
+Console.WriteLine($"[Producer] Published: {message}");
 
 static string GetRequiredSetting(IConfiguration configuration, string key)
 {
@@ -59,6 +55,5 @@ static string GetRequiredSetting(IConfiguration configuration, string key)
     {
         throw new InvalidOperationException($"Configuration '{key}' is still a placeholder; set it with dotnet user-secrets.");
     }
-
     return value;
 }

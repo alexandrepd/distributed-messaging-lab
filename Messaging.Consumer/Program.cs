@@ -20,50 +20,71 @@ var factory = new ConnectionFactory
 };
 
 using var connection = await factory.CreateConnectionAsync();
-using var channel = await connection.CreateChannelAsync();
+const string exchangeName = "orders.fanout.exchange";
 
-//var queueName = GetRequiredSetting(configuration, "RabbitMq:Queue");
-
-const string exchangeName = "orders.exchange";
-const string queueName = "orders.created";
-const string routingKey = "orders.created";
-
-await channel.ExchangeDeclareAsync(
-    exchange: exchangeName,
-    type: ExchangeType.Direct,
-    durable: true,
-    autoDelete: false,
-    arguments: null);
-
-await channel.QueueDeclareAsync(
-    queue: queueName,
-    durable: true,
-    exclusive: false,
-    autoDelete: false,
-    arguments: null);
-
-await channel.QueueBindAsync(
-    queue: queueName,
-    exchange: exchangeName,
-    routingKey: routingKey);
-
-var consumer = new AsyncEventingBasicConsumer(channel);
-
-consumer.ReceivedAsync += (sender, eventArgs) =>
+var services = new[]
 {
-    var body = eventArgs.Body.ToArray();
-    var message = Encoding.UTF8.GetString(body);
-    Console.WriteLine($"[Consumer] Message received: {message}");
-    return Task.CompletedTask;
+    // "payment",
+    "inventory",
+    "notification"
 };
 
-await channel.BasicConsumeAsync(
-    queue: queueName,
-    autoAck: true,
-    consumer: consumer
-);
+// Manter os Channels vivos enquanto os Consumers estiverem ativos.
+var channels = new List<IChannel>();
 
-Console.WriteLine("Press [enter] to exit.");
+foreach (var service in services)
+{
+    var channel = await connection.CreateChannelAsync();
+    channels.Add(channel);
+
+    //declarar exchange fanout y cola para cada servicio
+    await channel.ExchangeDeclareAsync(
+        exchange: exchangeName,
+        type: ExchangeType.Fanout,
+        durable: true,
+        autoDelete: false,
+        arguments: null);
+
+    var queueName = $"Ordes.{service}";
+
+    //criar fila para o serviço
+    await channel.QueueDeclareAsync(
+        queue: queueName,
+        durable: true,
+        exclusive: false,
+        autoDelete: false,
+        arguments: null);
+
+    //vincular fila ao exchange fanout
+    await channel.QueueBindAsync(
+        queue: queueName,
+        exchange: exchangeName,
+        routingKey: "");
+
+    var consumer = new AsyncEventingBasicConsumer(channel);
+
+    //tratar mensagens recebidas do exchange fanout
+    consumer.ReceivedAsync += (sender, eventArgs) =>
+    {
+        var body = eventArgs.Body.ToArray();
+        var message = Encoding.UTF8.GetString(body);
+
+        Console.WriteLine($"[{service.ToUpper()}] received: {message}");
+
+        return Task.CompletedTask;
+    };
+
+    //iniciar consumo da fila do serviço
+    await channel.BasicConsumeAsync(
+        queue: queueName,
+        autoAck: true,
+        consumer: consumer
+    );
+
+    Console.WriteLine($"Consumer for service '{service}' is running.");
+}
+
+Console.WriteLine("All consumers running. Press ENTER to exit.");
 Console.ReadLine();
 
 static string GetRequiredSetting(IConfiguration configuration, string key)
