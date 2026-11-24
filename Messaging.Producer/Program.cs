@@ -22,50 +22,37 @@ var factory = new ConnectionFactory
 };
 
 // Conexão = socket TCP com o broker; Channel = "canal lógico" dentro da conexão,
-// por onde passam os comandos AMQP (declarar exchange, publicar, etc.).
+// por onde passam os comandos AMQP (declarar fila, publicar, etc.).
 await using var connection = await factory.CreateConnectionAsync();
 await using var channel = await connection.CreateChannelAsync();
 
-const string exchangeName = "orders.topic.exchange";
+const string queueName = "orders.work";
 
-// Declara o exchange do tipo TOPIC (idempotente: se já existir com os mesmos
-// parâmetros, não faz nada). No topic, a routing key é composta por palavras
-// separadas por ponto (ex.: "orders.created") e o consumer faz o bind usando
-// padrões com curingas: '*' casa exatamente 1 palavra, '#' casa 0 ou mais.
-await channel.ExchangeDeclareAsync(
-    exchange: exchangeName,
-    type: ExchangeType.Topic,
-    durable: true,      // sobrevive a restart do broker
-    autoDelete: false,  // não é apagado quando o último bind some
+// Work queue: aqui NÃO há exchange customizado. A fila é declarada diretamente
+// e as mensagens são publicadas no exchange DEFAULT (""), um direct exchange
+// implícito que roteia para a fila cujo nome é igual à routing key.
+// A declaração é idempotente: se a fila já existir com os mesmos parâmetros, não faz nada.
+await channel.QueueDeclareAsync(
+    queue: queueName,
+    durable: true,      // fila sobrevive a restart do broker
+    exclusive: false,   // outras conexões também podem usar a fila
+    autoDelete: false,  // não é apagada quando o último consumer sai
     arguments: null
 );
 
-// Simula vários eventos de domínios diferentes (orders, payments, inventory).
-// Cada tupla é (routing key, nome do evento). A routing key segue o formato
-// "<dominio>.<acao>" — é ela que o exchange usa para decidir para quais filas
-// a mensagem vai, comparando com os padrões dos bindings.
-var events = new[]
+// Publica 20 tarefas de uma vez, para dar trabalho aos workers.
+for (var i = 1; i <= 20; i++)
 {
-    ("orders.created", "OrderCreated"),
-    ("orders.cancelled", "OrderCancelled"),
-    ("orders.paid", "OrderPaid"),
-    ("payments.failed", "PaymentFailed"),
-    ("payments.completed", "PaymentCompleted"),
-    ("inventory.reserved", "InventoryReserved")
-};
-
-foreach (var (routingKey, eventName) in events)
-{
-    var orderId = Guid.NewGuid();
-    var message = $"{eventName} | OrderId: {orderId}";
+    var message = $"Order: #{i}";
     var body = Encoding.UTF8.GetBytes(message); // AMQP transporta bytes, não strings
 
-    // Publica no exchange com a routing key do evento. O producer NÃO conhece
-    // as filas: quem decide o destino é o exchange, com base nos bindings.
-    // Se nenhum binding casar com a routing key, a mensagem é descartada.
+    // exchange: "" = exchange default; a routing key é o PRÓPRIO nome da fila.
+    // Com vários consumers na MESMA fila, o broker distribui as mensagens em
+    // round-robin: cada mensagem vai para UM único worker (competing consumers).
     await channel.BasicPublishAsync(
-        exchange: exchangeName,
-        routingKey: routingKey,
+        exchange: "",
+        routingKey: queueName,
+        mandatory: false, // false = descarta em silêncio se a fila não existir
         body: body);
 
     Console.WriteLine($"[Producer] Published: {message}");
