@@ -22,15 +22,30 @@ var factory = new ConnectionFactory
 using var connection = await factory.CreateConnectionAsync();
 using var channel = await connection.CreateChannelAsync();
 
-var queueName = GetRequiredSetting(configuration, "RabbitMq:Queue");
+//var queueName = GetRequiredSetting(configuration, "RabbitMq:Queue");
+
+const string exchangeName = "orders.exchange";
+const string queueName = "orders.created";
+const string routingKey = "orders.created";
+
+await channel.ExchangeDeclareAsync(
+    exchange: exchangeName,
+    type: ExchangeType.Direct,
+    durable: true,
+    autoDelete: false,
+    arguments: null);
 
 await channel.QueueDeclareAsync(
     queue: queueName,
     durable: true,
     exclusive: false,
     autoDelete: false,
-    arguments: null
-);
+    arguments: null);
+
+await channel.QueueBindAsync(
+    queue: queueName,
+    exchange: exchangeName,
+    routingKey: routingKey);
 
 var consumer = new AsyncEventingBasicConsumer(channel);
 

@@ -22,27 +22,30 @@ await using var channel = await connection.CreateChannelAsync();
 
 var queueName = GetRequiredSetting(configuration, "RabbitMq:Queue");
 
-await channel.QueueDeclareAsync(
-    queue: queueName,
+const string exchangeName = "orders.exchange";
+const string routingKey = "orders.cancelled";
+
+await channel.ExchangeDeclareAsync(
+    exchange: exchangeName,
+    type: ExchangeType.Direct,
     durable: true,
-    exclusive: false,
     autoDelete: false,
     arguments: null
 );
 
-var message = $"Order created at {DateTime.UtcNow:O}";
-var body = Encoding.UTF8.GetBytes(message);
 
-await channel.BasicPublishAsync(
-    exchange: "",
-    routingKey: queueName,
-    mandatory: false,
-    basicProperties: new BasicProperties(),
-    body: body
-);
-
-
-Console.WriteLine($"[Producer] Message sent: {message}");
+for (int i = 0; i < 10; i++)
+{
+    var message = $"Order {i} created at {DateTime.UtcNow:O}";
+    var body = Encoding.UTF8.GetBytes(message);
+    
+    await channel.BasicPublishAsync(
+        exchange: exchangeName,
+        routingKey: routingKey,
+        body: body);
+    
+    Console.WriteLine($"[Producer] Published: {message}");
+}
 
 static string GetRequiredSetting(IConfiguration configuration, string key)
 {
