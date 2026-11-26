@@ -23,23 +23,17 @@ var factory = new ConnectionFactory
     Password = GetRequiredSetting(configuration, "RabbitMq:Password")
 };
 
-// Nome do worker: 1º argumento da linha de comando ou, se faltar, o PID do processo.
-// Serve para distinguir as instâncias quando vários workers rodam em paralelo.
-var consumerName = args.FirstOrDefault() ?? $"worker-{Environment.ProcessId}";
-
-const string queueName = "orders.work";
-
 await using var connection = await factory.CreateConnectionAsync();
 await using var channel = await connection.CreateChannelAsync();
 
-// Declara a MESMA fila do producer, com os mesmos parâmetros (idempotente) —
-// assim funciona independente de quem sobe primeiro.
-await channel.QueueDeclareAsync(
-    queue: queueName,
-    durable: true,     // fila sobrevive a restart do broker
-    exclusive: false,  // outras conexões também podem usar a fila
-    autoDelete: false, // fila não é apagada quando o consumer sai
-    arguments: null);
+const string queueName = "orders.work";
+
+
+await channel.BasicQosAsync(
+prefetchSize: 0,
+prefetchCount: 1,
+global: false
+);
 
 var consumer = new AsyncEventingBasicConsumer(channel);
 
@@ -50,30 +44,45 @@ consumer.ReceivedAsync += async (sender, eventArgs) =>
     var body = eventArgs.Body.ToArray(); // payload chega como bytes
     var message = Encoding.UTF8.GetString(body);
 
-    Console.WriteLine($"[{consumerName}] Received: {message}");
+    Console.WriteLine($"Received: {message}");
 
-    // Simula um processamento demorado (1s por mensagem). Rodando 2+ workers,
-    // é isso que torna visível a distribuição round-robin entre eles.
-    await Task.Delay(1000);
+    try
+    {
+        Console.WriteLine($"Processing: {message}");
+        await Task.Delay(1500);
 
-    Console.WriteLine($"[{consumerName}] Processed: {message}");
+        if (message.Contains("Order: #5"))
+            throw new Exception($"Simulated processing error with message: [{message}]");
+
+        await channel.BasicRejectAsync(
+            deliveryTag: eventArgs.DeliveryTag,
+            requeue: false
+        );
+
+        Console.WriteLine($"ACK: [{message}]");
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Error processing message: {ex.Message}");
+
+        await channel.BasicNackAsync(
+            deliveryTag: eventArgs.DeliveryTag,
+            multiple: false,
+            requeue: false
+        );
+
+        Console.WriteLine($"NACK: {message}");
+    }
 };
 
-// Inicia o consumo. autoAck: true = o broker dá a mensagem como entregue assim
-// que a envia; se o worker morrer no meio do Task.Delay, a mensagem se perde.
-// Em produção: autoAck: false + BasicAckAsync após processar, e
-// BasicQosAsync(prefetchCount: 1) para "fair dispatch" (o broker só manda a
-// próxima mensagem quando o worker confirmar a atual).
 await channel.BasicConsumeAsync(
     queue: queueName,
-    autoAck: true,
-    consumer: consumer
-);
+    autoAck: false,
+    consumer: consumer);
 
-Console.WriteLine($"Listening on: {queueName}");
+Console.WriteLine($"Consumer listening on {queueName}");
+Console.WriteLine("Press ENTER to exit.");
 
-// ReadLine segura o processo vivo; o consumer trabalha em background.
-Console.WriteLine($"Worker '{consumerName}' running. Press ENTER to exit.");
 Console.ReadLine();
 
 static string GetRequiredSetting(IConfiguration configuration, string key)
